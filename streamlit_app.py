@@ -1,9 +1,14 @@
 import streamlit as st
-from main import process_documents, retrieve_chunks, generate_answer, process_google_sheet
+import sys
 import os
 import traceback
 import io
 import re
+
+# Make sure the current directory is in the path for importing main
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import main
+from main import process_documents, retrieve_chunks, generate_answer, process_google_sheet
 
 # Streamlit UI
 st.title("PDF & Excel RAG App")

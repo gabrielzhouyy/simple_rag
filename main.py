@@ -15,6 +15,7 @@ import datetime
 import mimetypes
 import requests
 import json
+import sys
 
 # Ensure NLTK data is downloaded properly
 try:
@@ -30,45 +31,61 @@ except LookupError:
 vector_db = None
 chunks_with_metadata = []
 
-# Initialize tokenizer with more robust error handling
+# Disable torch warning messages that are causing issues
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Initialize tokenizer with simplified error handling
 try:
     tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 except Exception as e:
     print(f"Error loading tokenizer: {str(e)}")
-    # Fallback to a simpler tokenizer
-    from transformers import BertTokenizer
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    try:
+        # Fallback to a simpler tokenizer
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    except:
+        print("Could not load any tokenizer, using simple text splitting")
+        # Define a simple tokenizer function as fallback
+        def simple_tokenize(text):
+            return text.split()
+        tokenizer = type('', (), {})()
+        tokenizer.tokenize = simple_tokenize
 
-# Initialize sentence transformer with robust error handling
+# Initialize sentence transformer with simpler approach to avoid torch errors
 try:
-    # Try with specific device settings to avoid CUDA issues
+    # Create sentence transformer with specific device and no_cache to avoid errors
     model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+    # Test the model with a simple input to verify it works
+    _ = model.encode(["Test sentence"], convert_to_numpy=True)
+    print("Successfully loaded SentenceTransformer model")
 except Exception as e:
     print(f"Error loading sentence transformer model: {str(e)}")
-    try:
-        # Try alternative model
-        model = SentenceTransformer('paraphrase-MiniLM-L6-v2', device='cpu')
-    except Exception as inner_e:
-        print(f"Error loading alternative model: {str(inner_e)}")
-        # Define a simple fallback embedding function
-        from transformers import BertModel, BertTokenizer
-        import torch
-        
-        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        bert_model = BertModel.from_pretrained('bert-base-uncased')
-        
-        def simple_encode(sentences, convert_to_numpy=True):
-            # Simple encoding function using BERT
-            encoded_input = bert_tokenizer(sentences, padding=True, truncation=True, return_tensors='pt')
-            with torch.no_grad():
-                model_output = bert_model(**encoded_input)
-            # Use the CLS token embedding as sentence embedding
-            embeddings = model_output.last_hidden_state[:, 0, :].numpy() if convert_to_numpy else model_output.last_hidden_state[:, 0, :]
-            return embeddings
-        
-        # Replace the model's encode method with our simple implementation
-        model = type('', (), {})()  # Create empty object
-        model.encode = simple_encode
+    # Define a very simple fallback embedding function using numpy
+    print("Using fallback embedding method")
+    def simple_encode(sentences, convert_to_numpy=True):
+        # Simple hashing-based embedding (not good for semantic search but works as fallback)
+        embeddings = []
+        for sentence in sentences:
+            # Create a simple embedding based on character hashing
+            chars = list(sentence.lower())
+            hash_values = [hash(char) % 256 for char in chars]
+            # Pad or truncate to fixed dimension
+            embedding_size = 384  # Standard size for mini models
+            if len(hash_values) >= embedding_size:
+                embedding = np.array(hash_values[:embedding_size], dtype=np.float32)
+            else:
+                embedding = np.zeros(embedding_size, dtype=np.float32)
+                embedding[:len(hash_values)] = hash_values
+            # Normalize the embedding
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            embeddings.append(embedding)
+        return np.array(embeddings)
+
+    # Replace the model's encode method with our simple implementation
+    model = type('', (), {})()
+    model.encode = simple_encode
 
 def process_documents(files):
     """
@@ -174,94 +191,51 @@ def process_pdf_file(pdf_file, all_chunks, chunks_with_metadata):
         print(f"Error processing PDF file {pdf_file.name}: {str(e)}")
 
 def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
-    """Process an Excel file and extract chunks"""
+    """Process an Excel file and extract chunks with robust error handling"""
     try:
         # Copy the file content to memory buffer
         excel_content = io.BytesIO(excel_file.read())
         excel_file.seek(0)  # Reset pointer
         
-        # Try multiple engines to read Excel file
-        engines = ['openpyxl', 'xlrd', None]  # None will use pandas' default engine
-        df = None
+        # First try with pandas directly (simplest approach)
+        try:
+            # Try without specifying engine first
+            df = pd.read_excel(excel_content)
+            process_generic_excel_sheet(df, "Sheet1", all_chunks, chunks_with_metadata, excel_file.name)
+            return
+        except Exception as e:
+            print(f"Standard Excel reading failed: {str(e)}")
+            excel_content.seek(0)  # Reset pointer
+        
+        # Try each engine explicitly, with multiple approaches
+        engines = ['openpyxl', 'xlrd']
         sheet_names = []
         
         for engine in engines:
             try:
-                if engine:
-                    print(f"Trying Excel engine: {engine}")
-                else:
-                    print("Trying default Excel engine")
-                
-                # Try to get sheet names
-                if engine:
-                    xl = pd.ExcelFile(excel_content, engine=engine)
-                else:
-                    xl = pd.ExcelFile(excel_content)
-                
-                sheet_names = xl.sheet_names
-                print(f"Successfully read sheet names: {sheet_names}")
-                break
-            except Exception as e:
-                print(f"Failed with engine {engine}: {str(e)}")
-                # Reset the file pointer for next attempt
-                excel_content.seek(0)
-        
-        # If we couldn't get sheet names, try a direct read approach
-        if not sheet_names:
-            print("Attempting to read Excel file without sheet names")
-            for engine in engines:
-                try:
-                    if engine:
-                        df = pd.read_excel(excel_content, engine=engine)
-                    else:
-                        df = pd.read_excel(excel_content)
-                    
-                    # If we get here, we have a dataframe
-                    print("Successfully read Excel file")
+                print(f"Trying Excel engine: {engine}")
+                # Try to get the first sheet only
+                df = pd.read_excel(excel_content, engine=engine)
+                if not df.empty:
                     process_generic_excel_sheet(df, "Sheet1", all_chunks, chunks_with_metadata, excel_file.name)
                     return
-                except Exception as e:
-                    print(f"Failed with direct read using engine {engine}: {str(e)}")
-                    excel_content.seek(0)
-            
-            # If we get here, we failed to read the Excel file
-            raise Exception("Failed to read Excel file with any engine")
-        
-        # Determine if it's a travel plan
-        is_travel_plan = False
-        travel_keywords = ['flight', 'hotel', 'accommodation', 'itinerary', 'reservation', 
-                          'departure', 'arrival', 'check-in', 'check-out', 'travel']
-        
-        # First pass to identify if it's a travel plan
-        for sheet_name in sheet_names:
-            try:
-                df = pd.read_excel(excel_content, sheet_name=sheet_name)
-                
-                # Convert column names to lowercase for case-insensitive matching
-                headers = [str(col).lower() for col in df.columns]
-                
-                # Check for travel keywords in headers
-                if any(keyword in ' '.join(headers) for keyword in travel_keywords):
-                    is_travel_plan = True
-                    break
-                
-                # Check first few rows for travel-related content
-                sample_content = ' '.join(df.head(5).values.flatten().astype(str).tolist()).lower()
-                if any(keyword in sample_content for keyword in travel_keywords):
-                    is_travel_plan = True
-                    break
             except Exception as e:
-                print(f"Error reading sheet {sheet_name}: {str(e)}")
+                print(f"Failed with engine {engine}: {str(e)}")
+                excel_content.seek(0)  # Reset pointer
         
-        # Process based on content type
-        if is_travel_plan:
-            process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, excel_file.name)
-        else:
-            process_structured_database(excel_content, sheet_names, all_chunks, chunks_with_metadata, excel_file.name)
+        # If we're here, all methods failed
+        raise Exception(f"Could not read Excel file {excel_file.name} with any available method")
             
     except Exception as e:
         print(f"Error processing Excel file {excel_file.name}: {str(e)}")
-        traceback.print_exc()
+        # Add this information as a text chunk so it's searchable
+        error_text = f"Error processing file {excel_file.name}: {str(e)}"
+        all_chunks.append(error_text)
+        chunks_with_metadata.append({
+            "text": error_text,
+            "source": excel_file.name,
+            "page": "Error"
+        })
 
 def process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, filename):
     """Extract information from a travel plan Excel file"""
@@ -466,14 +440,28 @@ def retrieve_chunks(query, top_k=3):
         raise ValueError("No documents have been processed yet. Please upload and process files before asking questions.")
     
     try:
+        # Handle the case where top_k is greater than the number of chunks
+        top_k = min(top_k, len(chunks_with_metadata))
+        
         query_embedding = model.encode([query], convert_to_numpy=True)
         faiss.normalize_L2(query_embedding)
         distances, indices = vector_db.search(query_embedding, top_k)
-        retrieved_chunks = [chunks_with_metadata[idx] for idx in indices[0]]
+        
+        # Check if indices are valid
+        valid_indices = [idx for idx in indices[0] if 0 <= idx < len(chunks_with_metadata)]
+        retrieved_chunks = [chunks_with_metadata[idx] for idx in valid_indices]
+        
+        # If no chunks were retrieved, return a message
+        if not retrieved_chunks:
+            raise ValueError("Could not find relevant information in the processed documents.")
+            
         return retrieved_chunks
     except Exception as e:
         print(f"Error retrieving chunks: {str(e)}")
-        raise ValueError(f"Error retrieving relevant information: {str(e)}")
+        if "Faiss index needs to be trained" in str(e):
+            raise ValueError("The search index is not ready. Please upload and process files before asking questions.")
+        else:
+            raise ValueError(f"Error retrieving relevant information: {str(e)}")
 
 @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(3))
 def call_openai_api(prompt):
