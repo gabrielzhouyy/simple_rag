@@ -7,10 +7,18 @@ from transformers import AutoTokenizer
 import re
 import openai
 import os
+import io
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 
-# Download required NLTK data
-nltk.download('punkt', quiet=True)
+# Ensure NLTK data is downloaded properly
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    try:
+        print("Downloading NLTK punkt data...")
+        nltk.download('punkt', quiet=True)
+    except Exception as e:
+        print(f"Error downloading NLTK data: {str(e)}")
 
 # Initialize global variables
 vector_db = None
@@ -28,51 +36,78 @@ def process_documents(pdf_files):
     chunks_with_metadata = []
     all_chunks = []
 
-    # Parse PDFs using pdfplumber (chosen for its robustness and free availability)
-    # pdfplumber is preferred over Unstructured because it provides reliable text extraction
-    # and metadata like page numbers with a simple API, and it’s entirely free.
+    # Parse PDFs using pdfplumber
     for pdf_file in pdf_files:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                text = page.extract_text()
-                if text:
-                    # Semantic chunking using NLTK sentence tokenization
-                    # NLTK is free, widely used, and robust for sentence boundary detection.
-                    sentences = nltk.sent_tokenize(text)
-                    current_chunk = ""
-                    for sentence in sentences:
-                        if len(tokenizer.tokenize(current_chunk + " " + sentence)) < 500:
-                            current_chunk += " " + sentence
-                        else:
-                            if current_chunk:
-                                all_chunks.append(current_chunk.strip())
-                                chunks_with_metadata.append({
-                                    "text": current_chunk.strip(),
-                                    "source": pdf_file.name,
-                                    "page": page_num
-                                })
-                            current_chunk = sentence
-                    if current_chunk:
-                        all_chunks.append(current_chunk.strip())
-                        chunks_with_metadata.append({
-                            "text": current_chunk.strip(),
-                            "source": pdf_file.name,
-                            "page": page_num
-                        })
+        try:
+            # Create a copy of the file in memory to avoid issues with file pointers
+            pdf_content = io.BytesIO(pdf_file.read())
+            pdf_file.seek(0)  # Reset pointer for potential future use
+            
+            with pdfplumber.open(pdf_content) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    try:
+                        text = page.extract_text()
+                        if text:
+                            try:
+                                # Fallback to simple splitting if NLTK fails
+                                try:
+                                    sentences = nltk.sent_tokenize(text)
+                                except LookupError:
+                                    # Simple fallback in case NLTK data is not available
+                                    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+                                    
+                                current_chunk = ""
+                                for sentence in sentences:
+                                    if len(tokenizer.tokenize(current_chunk + " " + sentence)) < 500:
+                                        current_chunk += " " + sentence
+                                    else:
+                                        if current_chunk:
+                                            all_chunks.append(current_chunk.strip())
+                                            chunks_with_metadata.append({
+                                                "text": current_chunk.strip(),
+                                                "source": pdf_file.name,
+                                                "page": page_num
+                                            })
+                                        current_chunk = sentence
+                                if current_chunk:
+                                    all_chunks.append(current_chunk.strip())
+                                    chunks_with_metadata.append({
+                                        "text": current_chunk.strip(),
+                                        "source": pdf_file.name,
+                                        "page": page_num
+                                    })
+                            except Exception as e:
+                                print(f"Error processing text on page {page_num}: {str(e)}")
+                                # Use fixed-size chunking as fallback
+                                chunks = fixed_size_chunking(text)
+                                for chunk in chunks:
+                                    all_chunks.append(chunk)
+                                    chunks_with_metadata.append({
+                                        "text": chunk,
+                                        "source": pdf_file.name,
+                                        "page": page_num
+                                    })
+                    except Exception as e:
+                        print(f"Error extracting text from page {page_num}: {str(e)}")
+        except Exception as e:
+            print(f"Error processing PDF file {pdf_file.name}: {str(e)}")
+    
+    # If no chunks were extracted, return 0
+    if not all_chunks:
+        return 0
+        
+    try:
+        # Embed chunks using all-MiniLM-L6-v2
+        embeddings = model.encode(all_chunks, convert_to_numpy=True)
 
-    # Fallback: If semantic chunking fails or is too complex, use fixed-size chunking
-    # with 500 tokens and 100-token overlap (commented out for simplicity).
-    # all_chunks = fixed_size_chunking(text, chunk_size=500, overlap=100)
-
-    # Embed chunks using all-MiniLM-L6-v2 (free, fast, and high-performing)
-    # Chosen over all-mpnet-base-v2 for lower memory footprint while maintaining good quality.
-    embeddings = model.encode(all_chunks, convert_to_numpy=True)
-
-    # Initialize FAISS index with cosine similarity
-    dimension = embeddings.shape[1]
-    vector_db = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
-    faiss.normalize_L2(embeddings)  # Normalize for cosine similarity
-    vector_db.add(embeddings)
+        # Initialize FAISS index with cosine similarity
+        dimension = embeddings.shape[1]
+        vector_db = faiss.IndexFlatIP(dimension)  # Inner Product for cosine similarity
+        faiss.normalize_L2(embeddings)  # Normalize for cosine similarity
+        vector_db.add(embeddings)
+    except Exception as e:
+        print(f"Error creating vector database: {str(e)}")
+        raise
 
     return len(all_chunks)
 
