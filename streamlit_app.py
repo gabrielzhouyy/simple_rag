@@ -137,6 +137,28 @@ if st.session_state.get('processed', False) or st.session_state.get('gsheet_proc
                     st.subheader("Sources")
                     for source, page in set(sources):  # Remove duplicates
                         st.write(f"- {source} (Page {page})")
+                    
+                    # Display chunks used for the answer
+                    st.subheader("Chunks Used for Answer")
+                    with st.expander("Show parsed chunks"):
+                        for i, chunk in enumerate(retrieved_chunks, 1):
+                            st.markdown(f"#### Chunk {i} - {chunk['source']} (Page {chunk['page']})")
+                            
+                            # Display the chunk content in a formatted way
+                            st.markdown("```")
+                            st.text(chunk['text'])
+                            st.markdown("```")
+                            
+                            # Add metadata as a table if it has interesting structure
+                            if chunk['page'] and 'Sheet' in str(chunk['page']):
+                                if 'Summary' in str(chunk['page']):
+                                    st.info("This is a summary chunk containing column information and statistics.")
+                                elif 'Rows' in str(chunk['page']):
+                                    rows_info = str(chunk['page']).split('Rows ')[1].strip(')')
+                                    st.info(f"This chunk contains data rows {rows_info}.")
+                            
+                            st.markdown("---")
+                            
                 except Exception as e:
                     st.error(f"Error generating answer: {str(e)}")
                     st.expander("See detailed error").write(traceback.format_exc())
