@@ -122,16 +122,27 @@ if (uploaded_files and not st.session_state.processed) or (valid_gsheet and not 
                 
                 # Display chunks grouped by source
                 for source, chunks in sources.items():
+                    # Check if source is a PDF file
+                    is_pdf = source.lower().endswith('.pdf')
+                    
                     with st.expander(f"{source} - {len(chunks)} chunks"):
                         for i, chunk in enumerate(chunks, 1):
                             st.markdown(f"**Chunk {i}** - Page: {chunk['page']}")
-                            # Display a preview of the text (first 100 characters)
-                            preview = chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
-                            st.text(preview)
                             
-                            # Show full text in a nested expander
-                            with st.expander("Show full content"):
-                                st.markdown(chunk['text'])
+                            # For PDFs, display the full content directly without nested expander
+                            if is_pdf:
+                                st.markdown("**Full content:**")
+                                st.markdown(f"```\n{chunk['text']}\n```")
+                            else:
+                                # For Excel/Google Sheets, keep the existing preview approach
+                                preview = chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
+                                st.text(preview)
+                                
+                                # Show full text in a nested expander (only for non-PDF files)
+                                with st.expander("Show full content"):
+                                    st.markdown(chunk['text'])
+                            
+                            st.markdown("---")  # Separator between chunks
             else:
                 st.error("No text could be extracted from the provided sources.")
                 st.session_state.error = "Failed to extract text from sources."
@@ -184,10 +195,9 @@ if st.session_state.get('processed', False) or st.session_state.get('gsheet_proc
                                 for i, chunk in enumerate(retrieved_chunks, 1):
                                     st.markdown(f"#### Chunk {i} - {chunk['source']} (Page {chunk['page']})")
                                     
-                                    # Display the chunk content in a formatted way
-                                    st.markdown("```")
-                                    st.text(chunk['text'])
-                                    st.markdown("```")
+                                    # Display the chunk content in a formatted way - without nested expanders
+                                    st.markdown("**Content:**")
+                                    st.markdown(f"```\n{chunk['text']}\n```")
                                     
                                     # Add metadata as a table if it has interesting structure
                                     if chunk['page'] and 'Sheet' in str(chunk['page']):
