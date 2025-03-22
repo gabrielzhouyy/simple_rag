@@ -42,22 +42,20 @@ def process_documents(files):
     # Process each file based on type
     for file in files:
         try:
-            # Check file type by extension first
+            # Check file type by extension (more reliable than MIME type)
             file_extension = os.path.splitext(file.name)[1].lower()
             
-            # Also check MIME type if available
-            mime_type = getattr(file, 'type', None)
+            print(f"Processing file: {file.name} with extension {file_extension}")
             
-            # Process based on determined file type
-            if file_extension == '.pdf' or (mime_type and mime_type == 'application/pdf'):
+            if file_extension == '.pdf':
                 process_pdf_file(file, all_chunks, chunks_with_metadata)
-            elif (file_extension in ['.xlsx', '.xls'] or 
-                  (mime_type and ('excel' in mime_type or 'spreadsheet' in mime_type))):
+            elif file_extension in ['.xlsx', '.xls']:
                 process_excel_file(file, all_chunks, chunks_with_metadata)
             else:
-                print(f"Unsupported file format: {file.name} ({mime_type or 'unknown type'})")
+                print(f"Unsupported file format: {file_extension}")
         except Exception as e:
             print(f"Error processing file {file.name}: {str(e)}")
+            traceback.print_exc()
     
     # If no chunks were extracted, return 0
     if not all_chunks:
@@ -137,27 +135,58 @@ def process_pdf_file(pdf_file, all_chunks, chunks_with_metadata):
 def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
     """Process an Excel file and extract chunks"""
     try:
-        # Create a copy of the file in memory to avoid issues with file pointers
+        # Copy the file content to memory buffer
         excel_content = io.BytesIO(excel_file.read())
         excel_file.seek(0)  # Reset pointer
         
-        try:
-            # Get all sheet names - with better error handling
-            xls = pd.ExcelFile(excel_content)
-            sheet_names = xls.sheet_names
-        except Exception as e:
-            print(f"Error reading Excel file structure: {str(e)}")
-            # Try to read with specific engine as fallback
-            try:
-                print("Attempting to read with openpyxl engine...")
-                df = pd.read_excel(excel_content, engine='openpyxl')
-                process_generic_excel_sheet(df, "Sheet1", all_chunks, chunks_with_metadata, excel_file.name)
-                return
-            except Exception as inner_e:
-                print(f"Fallback Excel reading failed: {str(inner_e)}")
-                raise
+        # Try multiple engines to read Excel file
+        engines = ['openpyxl', 'xlrd', None]  # None will use pandas' default engine
+        df = None
+        sheet_names = []
         
-        # Check if it's a travel plan or a structured database
+        for engine in engines:
+            try:
+                if engine:
+                    print(f"Trying Excel engine: {engine}")
+                else:
+                    print("Trying default Excel engine")
+                
+                # Try to get sheet names
+                if engine:
+                    xl = pd.ExcelFile(excel_content, engine=engine)
+                else:
+                    xl = pd.ExcelFile(excel_content)
+                
+                sheet_names = xl.sheet_names
+                print(f"Successfully read sheet names: {sheet_names}")
+                break
+            except Exception as e:
+                print(f"Failed with engine {engine}: {str(e)}")
+                # Reset the file pointer for next attempt
+                excel_content.seek(0)
+        
+        # If we couldn't get sheet names, try a direct read approach
+        if not sheet_names:
+            print("Attempting to read Excel file without sheet names")
+            for engine in engines:
+                try:
+                    if engine:
+                        df = pd.read_excel(excel_content, engine=engine)
+                    else:
+                        df = pd.read_excel(excel_content)
+                    
+                    # If we get here, we have a dataframe
+                    print("Successfully read Excel file")
+                    process_generic_excel_sheet(df, "Sheet1", all_chunks, chunks_with_metadata, excel_file.name)
+                    return
+                except Exception as e:
+                    print(f"Failed with direct read using engine {engine}: {str(e)}")
+                    excel_content.seek(0)
+            
+            # If we get here, we failed to read the Excel file
+            raise Exception("Failed to read Excel file with any engine")
+        
+        # Determine if it's a travel plan
         is_travel_plan = False
         travel_keywords = ['flight', 'hotel', 'accommodation', 'itinerary', 'reservation', 
                           'departure', 'arrival', 'check-in', 'check-out', 'travel']
@@ -183,7 +212,7 @@ def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
             except Exception as e:
                 print(f"Error reading sheet {sheet_name}: {str(e)}")
         
-        # Process as travel plan or structured database
+        # Process based on content type
         if is_travel_plan:
             process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, excel_file.name)
         else:
@@ -191,6 +220,7 @@ def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
             
     except Exception as e:
         print(f"Error processing Excel file {excel_file.name}: {str(e)}")
+        traceback.print_exc()
 
 def process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, filename):
     """Extract information from a travel plan Excel file"""
