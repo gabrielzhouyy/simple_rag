@@ -1,12 +1,21 @@
 import streamlit as st
-from main import process_documents, retrieve_chunks, generate_answer
+from main import process_documents, retrieve_chunks, generate_answer, process_google_sheet
 import os
 import traceback
 import io
+import re
 
 # Streamlit UI
 st.title("PDF & Excel RAG App")
-st.write("Upload PDFs and Excel files and ask questions based on their content.")
+st.write("Upload PDFs and Excel files or link Google Sheets and ask questions based on their content.")
+
+# Add a comprehensive reset button at the top
+if st.button("🔄 Reset Everything"):
+    # Clear all session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    # Rerun the app to clear UI elements
+    st.experimental_rerun()
 
 # Configure OpenAI API key
 if "OPENAI_API_KEY" in st.secrets:
@@ -21,9 +30,32 @@ else:
         st.warning("Please enter your OpenAI API key to continue.")
         st.stop()
 
-# File uploader - simplified approach
-st.write("### Upload Files")
-st.write("Supported formats: PDF (.pdf), Excel (.xlsx, .xls)")
+# File upload section
+st.write("### Upload Files or Enter Google Sheet URL")
+st.write("Supported formats: PDF (.pdf), Excel (.xlsx, .xls), Google Sheets (URL)")
+
+# Initialize session state for Google Sheet
+if 'gsheet_url' not in st.session_state:
+    st.session_state.gsheet_url = ""
+if 'gsheet_processed' not in st.session_state:
+    st.session_state.gsheet_processed = False
+
+# Google Sheets URL input
+gsheet_url = st.text_input(
+    "Enter Google Sheets URL (must be publicly accessible or shared with view access)",
+    value=st.session_state.gsheet_url
+)
+
+# Validate Google Sheets URL if provided
+valid_gsheet = False
+if gsheet_url:
+    # Simple validation for Google Sheets URL format
+    gsheet_pattern = r'https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)(/.*)?'
+    if re.match(gsheet_pattern, gsheet_url):
+        valid_gsheet = True
+        st.session_state.gsheet_url = gsheet_url
+    else:
+        st.error("Invalid Google Sheets URL. Please enter a valid URL.")
 
 # Create separate uploaders for each file type to avoid MIME type issues
 pdf_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
@@ -45,32 +77,50 @@ if 'processed' not in st.session_state:
 if 'error' not in st.session_state:
     st.session_state.error = None
 
-# Process uploaded files
-if uploaded_files and not st.session_state.processed:
-    with st.spinner("Processing files..."):
+# Process uploaded files or Google Sheet
+if (uploaded_files and not st.session_state.processed) or (valid_gsheet and not st.session_state.gsheet_processed):
+    with st.spinner("Processing files and data sources..."):
         try:
-            num_chunks = process_documents(uploaded_files)
+            num_chunks = 0
+            
+            # Process uploaded files if any
+            if uploaded_files:
+                num_chunks += process_documents(uploaded_files)
+                
+            # Process Google Sheet if valid URL provided
+            if valid_gsheet:
+                try:
+                    sheet_chunks = process_google_sheet(gsheet_url)
+                    num_chunks += sheet_chunks
+                    st.session_state.gsheet_processed = True
+                except Exception as e:
+                    st.error(f"Error processing Google Sheet: {str(e)}")
+                    st.expander("See detailed error").write(traceback.format_exc())
+            
             if num_chunks > 0:
                 st.session_state.processed = True
-                st.success(f"Processed {len(uploaded_files)} files into {num_chunks} chunks.")
+                st.success(f"Processed {len(uploaded_files) if uploaded_files else 0} files and " +
+                          f"{1 if valid_gsheet and st.session_state.gsheet_processed else 0} Google Sheets " +
+                          f"into {num_chunks} chunks.")
             else:
-                st.error("No text could be extracted from the uploaded files.")
-                st.session_state.error = "Failed to extract text from files."
+                st.error("No text could be extracted from the provided sources.")
+                st.session_state.error = "Failed to extract text from sources."
         except Exception as e:
             error_msg = str(e)
-            st.error(f"Error processing files: {error_msg}")
+            st.error(f"Error processing sources: {error_msg}")
             st.session_state.error = error_msg
             st.expander("See detailed error").write(traceback.format_exc())
 
 # If there was an error, provide a reset button
 if st.session_state.error:
-    if st.button("Reset"):
+    if st.button("Reset Processing"):
         st.session_state.processed = False
+        st.session_state.gsheet_processed = False
         st.session_state.error = None
         st.experimental_rerun()
 
 # Query input and processing
-if st.session_state.get('processed', False):
+if st.session_state.get('processed', False) or st.session_state.get('gsheet_processed', False):
     query = st.text_input("Enter your question:")
     if st.button("Get Answer"):
         if query:
@@ -93,4 +143,4 @@ if st.session_state.get('processed', False):
         else:
             st.warning("Please enter a question.")
 elif not st.session_state.error:
-    st.info("Please upload at least one PDF to start.")
+    st.info("Please upload at least one file or provide a Google Sheet URL to start.")
