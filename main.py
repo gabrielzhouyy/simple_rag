@@ -11,6 +11,7 @@ import io
 from tenacity import retry, wait_random_exponential, stop_after_attempt
 import pandas as pd
 import datetime
+import mimetypes
 
 # Ensure NLTK data is downloaded properly
 try:
@@ -41,14 +42,20 @@ def process_documents(files):
     # Process each file based on type
     for file in files:
         try:
+            # Check file type by extension first
             file_extension = os.path.splitext(file.name)[1].lower()
             
-            if file_extension == '.pdf':
+            # Also check MIME type if available
+            mime_type = getattr(file, 'type', None)
+            
+            # Process based on determined file type
+            if file_extension == '.pdf' or (mime_type and mime_type == 'application/pdf'):
                 process_pdf_file(file, all_chunks, chunks_with_metadata)
-            elif file_extension in ['.xlsx', '.xls']:
+            elif (file_extension in ['.xlsx', '.xls'] or 
+                  (mime_type and ('excel' in mime_type or 'spreadsheet' in mime_type))):
                 process_excel_file(file, all_chunks, chunks_with_metadata)
             else:
-                print(f"Unsupported file format: {file_extension}")
+                print(f"Unsupported file format: {file.name} ({mime_type or 'unknown type'})")
         except Exception as e:
             print(f"Error processing file {file.name}: {str(e)}")
     
@@ -130,13 +137,25 @@ def process_pdf_file(pdf_file, all_chunks, chunks_with_metadata):
 def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
     """Process an Excel file and extract chunks"""
     try:
-        # Read the Excel file
+        # Create a copy of the file in memory to avoid issues with file pointers
         excel_content = io.BytesIO(excel_file.read())
         excel_file.seek(0)  # Reset pointer
         
-        # Get all sheet names
-        xls = pd.ExcelFile(excel_content)
-        sheet_names = xls.sheet_names
+        try:
+            # Get all sheet names - with better error handling
+            xls = pd.ExcelFile(excel_content)
+            sheet_names = xls.sheet_names
+        except Exception as e:
+            print(f"Error reading Excel file structure: {str(e)}")
+            # Try to read with specific engine as fallback
+            try:
+                print("Attempting to read with openpyxl engine...")
+                df = pd.read_excel(excel_content, engine='openpyxl')
+                process_generic_excel_sheet(df, "Sheet1", all_chunks, chunks_with_metadata, excel_file.name)
+                return
+            except Exception as inner_e:
+                print(f"Fallback Excel reading failed: {str(inner_e)}")
+                raise
         
         # Check if it's a travel plan or a structured database
         is_travel_plan = False
