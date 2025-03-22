@@ -458,11 +458,22 @@ def retrieve_chunks(query, top_k=3):
     Retrieve top-k relevant chunks from FAISS based on query.
     Top-k=3 chosen as a balance between context richness and response brevity.
     """
-    query_embedding = model.encode([query], convert_to_numpy=True)
-    faiss.normalize_L2(query_embedding)
-    distances, indices = vector_db.search(query_embedding, top_k)
-    retrieved_chunks = [chunks_with_metadata[idx] for idx in indices[0]]
-    return retrieved_chunks
+    global vector_db, chunks_with_metadata
+    
+    # Check if vector_db is initialized
+    if vector_db is None or len(chunks_with_metadata) == 0:
+        print("Vector database is not initialized or no chunks are available")
+        raise ValueError("No documents have been processed yet. Please upload and process files before asking questions.")
+    
+    try:
+        query_embedding = model.encode([query], convert_to_numpy=True)
+        faiss.normalize_L2(query_embedding)
+        distances, indices = vector_db.search(query_embedding, top_k)
+        retrieved_chunks = [chunks_with_metadata[idx] for idx in indices[0]]
+        return retrieved_chunks
+    except Exception as e:
+        print(f"Error retrieving chunks: {str(e)}")
+        raise ValueError(f"Error retrieving relevant information: {str(e)}")
 
 @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(3))
 def call_openai_api(prompt):

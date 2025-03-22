@@ -102,14 +102,42 @@ if (uploaded_files and not st.session_state.processed) or (valid_gsheet and not 
                 st.success(f"Processed {len(uploaded_files) if uploaded_files else 0} files and " +
                           f"{1 if valid_gsheet and st.session_state.gsheet_processed else 0} Google Sheets " +
                           f"into {num_chunks} chunks.")
+                
+                # Display information about the chunks
+                st.subheader("Generated Document Chunks")
+                st.write(f"Total chunks created: {len(main.chunks_with_metadata)}")
+                
+                # Group chunks by source
+                sources = {}
+                for chunk in main.chunks_with_metadata:
+                    source = chunk["source"]
+                    if source not in sources:
+                        sources[source] = []
+                    sources[source].append(chunk)
+                
+                # Display chunks grouped by source
+                for source, chunks in sources.items():
+                    with st.expander(f"{source} - {len(chunks)} chunks"):
+                        for i, chunk in enumerate(chunks, 1):
+                            st.markdown(f"**Chunk {i}** - Page: {chunk['page']}")
+                            # Display a preview of the text (first 100 characters)
+                            preview = chunk['text'][:100] + "..." if len(chunk['text']) > 100 else chunk['text']
+                            st.text(preview)
+                            
+                            # Show full text in a nested expander
+                            with st.expander("Show full content"):
+                                st.markdown(chunk['text'])
             else:
                 st.error("No text could be extracted from the provided sources.")
                 st.session_state.error = "Failed to extract text from sources."
+                st.session_state.processed = False  # Add this line to ensure processed state is correctly set
+                st.session_state.gsheet_processed = False  # Reset this too if there's an error
         except Exception as e:
             error_msg = str(e)
             st.error(f"Error processing sources: {error_msg}")
             st.session_state.error = error_msg
-            st.expander("See detailed error").write(traceback.format_exc())
+            st.session_state.processed = False  # Ensure processed state is reset on error
+            st.session_state.gsheet_processed = False  # Reset this too if there's an error
 
 # If there was an error, provide a reset button
 if st.session_state.error:
@@ -119,46 +147,58 @@ if st.session_state.error:
         st.session_state.error = None
         st.rerun()  # Changed from experimental_rerun() to rerun()
 
-# Query input and processing
+# Query input and processing - add safety checks
 if st.session_state.get('processed', False) or st.session_state.get('gsheet_processed', False):
+    st.write("### Ask Questions About Your Documents")
     query = st.text_input("Enter your question:")
+    
     if st.button("Get Answer"):
         if query:
             with st.spinner("Generating answer..."):
                 try:
-                    retrieved_chunks = retrieve_chunks(query)
-                    answer, sources = generate_answer(query, retrieved_chunks)
-                    
-                    # Display answer
-                    st.subheader("Answer")
-                    st.write(answer)
-                    
-                    # Display sources
-                    st.subheader("Sources")
-                    for source, page in set(sources):  # Remove duplicates
-                        st.write(f"- {source} (Page {page})")
-                    
-                    # Display chunks used for the answer
-                    st.subheader("Chunks Used for Answer")
-                    with st.expander("Show parsed chunks"):
-                        for i, chunk in enumerate(retrieved_chunks, 1):
-                            st.markdown(f"#### Chunk {i} - {chunk['source']} (Page {chunk['page']})")
+                    # Add a verification check before retrieving chunks
+                    if not (st.session_state.get('processed', False) or st.session_state.get('gsheet_processed', False)):
+                        st.error("Please process documents first before asking questions.")
+                    else:
+                        try:
+                            retrieved_chunks = retrieve_chunks(query)
+                            answer, sources = generate_answer(query, retrieved_chunks)
                             
-                            # Display the chunk content in a formatted way
-                            st.markdown("```")
-                            st.text(chunk['text'])
-                            st.markdown("```")
+                            # Display answer
+                            st.subheader("Answer")
+                            st.write(answer)
                             
-                            # Add metadata as a table if it has interesting structure
-                            if chunk['page'] and 'Sheet' in str(chunk['page']):
-                                if 'Summary' in str(chunk['page']):
-                                    st.info("This is a summary chunk containing column information and statistics.")
-                                elif 'Rows' in str(chunk['page']):
-                                    rows_info = str(chunk['page']).split('Rows ')[1].strip(')')
-                                    st.info(f"This chunk contains data rows {rows_info}.")
+                            # Display sources
+                            st.subheader("Sources")
+                            for source, page in set(sources):  # Remove duplicates
+                                st.write(f"- {source} (Page {page})")
                             
-                            st.markdown("---")
-                            
+                            # Display chunks used for the answer
+                            st.subheader("Chunks Used for Answer")
+                            with st.expander("Show parsed chunks"):
+                                for i, chunk in enumerate(retrieved_chunks, 1):
+                                    st.markdown(f"#### Chunk {i} - {chunk['source']} (Page {chunk['page']})")
+                                    
+                                    # Display the chunk content in a formatted way
+                                    st.markdown("```")
+                                    st.text(chunk['text'])
+                                    st.markdown("```")
+                                    
+                                    # Add metadata as a table if it has interesting structure
+                                    if chunk['page'] and 'Sheet' in str(chunk['page']):
+                                        if 'Summary' in str(chunk['page']):
+                                            st.info("This is a summary chunk containing column information and statistics.")
+                                        elif 'Rows' in str(chunk['page']):
+                                            rows_info = str(chunk['page']).split('Rows ')[1].strip(')')
+                                            st.info(f"This chunk contains data rows {rows_info}.")
+                                    
+                                    st.markdown("---")
+                        except ValueError as ve:
+                            st.error(str(ve))
+                        except Exception as e:
+                            st.error(f"Error retrieving or processing data: {str(e)}")
+                            st.session_state.error = str(e)
+                            st.expander("See detailed error").write(traceback.format_exc())
                 except Exception as e:
                     st.error(f"Error generating answer: {str(e)}")
                     st.expander("See detailed error").write(traceback.format_exc())
@@ -166,3 +206,10 @@ if st.session_state.get('processed', False) or st.session_state.get('gsheet_proc
             st.warning("Please enter a question.")
 elif not st.session_state.error:
     st.info("Please upload at least one file or provide a Google Sheet URL to start.")
+else:
+    st.error("There was an error processing your documents. Please reset and try again.")
+    if st.button("Reset and Try Again"):
+        st.session_state.processed = False
+        st.session_state.gsheet_processed = False
+        st.session_state.error = None
+        st.rerun()
