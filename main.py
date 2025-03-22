@@ -9,6 +9,8 @@ import openai
 import os
 import io
 from tenacity import retry, wait_random_exponential, stop_after_attempt
+import pandas as pd
+import datetime
 
 # Ensure NLTK data is downloaded properly
 try:
@@ -26,9 +28,9 @@ chunks_with_metadata = []
 tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
-def process_documents(pdf_files):
+def process_documents(files):
     """
-    Process uploaded PDF files: parse, chunk, embed, and store in FAISS.
+    Process uploaded files (PDFs and Excel): parse, chunk, embed, and store in FAISS.
     """
     global vector_db, chunks_with_metadata
 
@@ -36,61 +38,19 @@ def process_documents(pdf_files):
     chunks_with_metadata = []
     all_chunks = []
 
-    # Parse PDFs using pdfplumber
-    for pdf_file in pdf_files:
+    # Process each file based on type
+    for file in files:
         try:
-            # Create a copy of the file in memory to avoid issues with file pointers
-            pdf_content = io.BytesIO(pdf_file.read())
-            pdf_file.seek(0)  # Reset pointer for potential future use
+            file_extension = os.path.splitext(file.name)[1].lower()
             
-            with pdfplumber.open(pdf_content) as pdf:
-                for page_num, page in enumerate(pdf.pages, 1):
-                    try:
-                        text = page.extract_text()
-                        if text:
-                            try:
-                                # Fallback to simple splitting if NLTK fails
-                                try:
-                                    sentences = nltk.sent_tokenize(text)
-                                except LookupError:
-                                    # Simple fallback in case NLTK data is not available
-                                    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
-                                    
-                                current_chunk = ""
-                                for sentence in sentences:
-                                    if len(tokenizer.tokenize(current_chunk + " " + sentence)) < 500:
-                                        current_chunk += " " + sentence
-                                    else:
-                                        if current_chunk:
-                                            all_chunks.append(current_chunk.strip())
-                                            chunks_with_metadata.append({
-                                                "text": current_chunk.strip(),
-                                                "source": pdf_file.name,
-                                                "page": page_num
-                                            })
-                                        current_chunk = sentence
-                                if current_chunk:
-                                    all_chunks.append(current_chunk.strip())
-                                    chunks_with_metadata.append({
-                                        "text": current_chunk.strip(),
-                                        "source": pdf_file.name,
-                                        "page": page_num
-                                    })
-                            except Exception as e:
-                                print(f"Error processing text on page {page_num}: {str(e)}")
-                                # Use fixed-size chunking as fallback
-                                chunks = fixed_size_chunking(text)
-                                for chunk in chunks:
-                                    all_chunks.append(chunk)
-                                    chunks_with_metadata.append({
-                                        "text": chunk,
-                                        "source": pdf_file.name,
-                                        "page": page_num
-                                    })
-                    except Exception as e:
-                        print(f"Error extracting text from page {page_num}: {str(e)}")
+            if file_extension == '.pdf':
+                process_pdf_file(file, all_chunks, chunks_with_metadata)
+            elif file_extension in ['.xlsx', '.xls']:
+                process_excel_file(file, all_chunks, chunks_with_metadata)
+            else:
+                print(f"Unsupported file format: {file_extension}")
         except Exception as e:
-            print(f"Error processing PDF file {pdf_file.name}: {str(e)}")
+            print(f"Error processing file {file.name}: {str(e)}")
     
     # If no chunks were extracted, return 0
     if not all_chunks:
@@ -110,6 +70,298 @@ def process_documents(pdf_files):
         raise
 
     return len(all_chunks)
+
+def process_pdf_file(pdf_file, all_chunks, chunks_with_metadata):
+    """Process a single PDF file and extract chunks"""
+    try:
+        # Create a copy of the file in memory to avoid issues with file pointers
+        pdf_content = io.BytesIO(pdf_file.read())
+        pdf_file.seek(0)  # Reset pointer for potential future use
+        
+        with pdfplumber.open(pdf_content) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                try:
+                    text = page.extract_text()
+                    if text:
+                        try:
+                            # Fallback to simple splitting if NLTK fails
+                            try:
+                                sentences = nltk.sent_tokenize(text)
+                            except LookupError:
+                                # Simple fallback in case NLTK data is not available
+                                sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+                                
+                            current_chunk = ""
+                            for sentence in sentences:
+                                if len(tokenizer.tokenize(current_chunk + " " + sentence)) < 500:
+                                    current_chunk += " " + sentence
+                                else:
+                                    if current_chunk:
+                                        all_chunks.append(current_chunk.strip())
+                                        chunks_with_metadata.append({
+                                            "text": current_chunk.strip(),
+                                            "source": pdf_file.name,
+                                            "page": page_num
+                                        })
+                                    current_chunk = sentence
+                            if current_chunk:
+                                all_chunks.append(current_chunk.strip())
+                                chunks_with_metadata.append({
+                                    "text": current_chunk.strip(),
+                                    "source": pdf_file.name,
+                                    "page": page_num
+                                })
+                        except Exception as e:
+                            print(f"Error processing text on page {page_num}: {str(e)}")
+                            # Use fixed-size chunking as fallback
+                            chunks = fixed_size_chunking(text)
+                            for chunk in chunks:
+                                all_chunks.append(chunk)
+                                chunks_with_metadata.append({
+                                    "text": chunk,
+                                    "source": pdf_file.name,
+                                    "page": page_num
+                                })
+                except Exception as e:
+                    print(f"Error extracting text from page {page_num}: {str(e)}")
+    except Exception as e:
+        print(f"Error processing PDF file {pdf_file.name}: {str(e)}")
+
+def process_excel_file(excel_file, all_chunks, chunks_with_metadata):
+    """Process an Excel file and extract chunks"""
+    try:
+        # Read the Excel file
+        excel_content = io.BytesIO(excel_file.read())
+        excel_file.seek(0)  # Reset pointer
+        
+        # Get all sheet names
+        xls = pd.ExcelFile(excel_content)
+        sheet_names = xls.sheet_names
+        
+        # Check if it's a travel plan or a structured database
+        is_travel_plan = False
+        travel_keywords = ['flight', 'hotel', 'accommodation', 'itinerary', 'reservation', 
+                          'departure', 'arrival', 'check-in', 'check-out', 'travel']
+        
+        # First pass to identify if it's a travel plan
+        for sheet_name in sheet_names:
+            try:
+                df = pd.read_excel(excel_content, sheet_name=sheet_name)
+                
+                # Convert column names to lowercase for case-insensitive matching
+                headers = [str(col).lower() for col in df.columns]
+                
+                # Check for travel keywords in headers
+                if any(keyword in ' '.join(headers) for keyword in travel_keywords):
+                    is_travel_plan = True
+                    break
+                
+                # Check first few rows for travel-related content
+                sample_content = ' '.join(df.head(5).values.flatten().astype(str).tolist()).lower()
+                if any(keyword in sample_content for keyword in travel_keywords):
+                    is_travel_plan = True
+                    break
+            except Exception as e:
+                print(f"Error reading sheet {sheet_name}: {str(e)}")
+        
+        # Process as travel plan or structured database
+        if is_travel_plan:
+            process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, excel_file.name)
+        else:
+            process_structured_database(excel_content, sheet_names, all_chunks, chunks_with_metadata, excel_file.name)
+            
+    except Exception as e:
+        print(f"Error processing Excel file {excel_file.name}: {str(e)}")
+
+def process_travel_plan(excel_content, sheet_names, all_chunks, chunks_with_metadata, filename):
+    """Extract information from a travel plan Excel file"""
+    extracted_info = []
+    
+    # Travel-related fields to look for
+    flight_fields = ['airline', 'flight', 'departure', 'arrival', 'origin', 'destination']
+    hotel_fields = ['hotel', 'accommodation', 'check-in', 'check-out', 'stay']
+    activity_fields = ['activity', 'event', 'tour', 'visit', 'sightseeing']
+    
+    for sheet_idx, sheet_name in enumerate(sheet_names, 1):
+        try:
+            df = pd.read_excel(excel_content, sheet_name=sheet_name)
+            
+            # Drop completely empty rows and columns
+            df = df.dropna(how='all').dropna(axis=1, how='all')
+            
+            if df.empty:
+                continue
+                
+            # Convert headers to string and lowercase for matching
+            headers = [str(col).lower() for col in df.columns]
+            
+            # Extract flight details
+            flight_info = []
+            flight_cols = [i for i, header in enumerate(headers) 
+                           if any(field in header for field in flight_fields)]
+            
+            if flight_cols:
+                for _, row in df.iterrows():
+                    flight_data = {}
+                    for col_idx in flight_cols:
+                        col_name = df.columns[col_idx]
+                        value = row[col_name]
+                        if pd.notna(value):
+                            flight_data[str(col_name)] = str(value)
+                    
+                    if flight_data:
+                        flight_info.append(flight_data)
+            
+            # Extract hotel details similarly
+            hotel_info = []
+            hotel_cols = [i for i, header in enumerate(headers) 
+                          if any(field in header for field in hotel_fields)]
+            
+            if hotel_cols:
+                for _, row in df.iterrows():
+                    hotel_data = {}
+                    for col_idx in hotel_cols:
+                        col_name = df.columns[col_idx]
+                        value = row[col_name]
+                        if pd.notna(value):
+                            hotel_data[str(col_name)] = str(value)
+                    
+                    if hotel_data:
+                        hotel_info.append(hotel_data)
+            
+            # Extract activity details similarly
+            activity_info = []
+            activity_cols = [i for i, header in enumerate(headers) 
+                             if any(field in header for field in activity_fields)]
+            
+            if activity_cols:
+                for _, row in df.iterrows():
+                    activity_data = {}
+                    for col_idx in activity_cols:
+                        col_name = df.columns[col_idx]
+                        value = row[col_name]
+                        if pd.notna(value):
+                            activity_data[str(col_name)] = str(value)
+                    
+                    if activity_data:
+                        activity_info.append(activity_data)
+            
+            # Create a structured summary of the travel information
+            summary = f"Travel Plan Information (Sheet: {sheet_name}):\n\n"
+            
+            if flight_info:
+                summary += "Flight Details:\n"
+                for i, flight in enumerate(flight_info, 1):
+                    summary += f"  Flight {i}: {', '.join([f'{k}: {v}' for k, v in flight.items()])}\n"
+                summary += "\n"
+            
+            if hotel_info:
+                summary += "Hotel Details:\n"
+                for i, hotel in enumerate(hotel_info, 1):
+                    summary += f"  Hotel {i}: {', '.join([f'{k}: {v}' for k, v in hotel.items()])}\n"
+                summary += "\n"
+            
+            if activity_info:
+                summary += "Activity Details:\n"
+                for i, activity in enumerate(activity_info, 1):
+                    summary += f"  Activity {i}: {', '.join([f'{k}: {v}' for k, v in activity.items()])}\n"
+            
+            # Add the summary as a chunk
+            if len(summary.strip()) > 10:  # Only add if there's meaningful content
+                all_chunks.append(summary)
+                chunks_with_metadata.append({
+                    "text": summary,
+                    "source": filename,
+                    "page": f"Sheet {sheet_name}"
+                })
+            
+            # If we couldn't extract structured travel info, fallback to general processing
+            if not (flight_info or hotel_info or activity_info):
+                process_generic_excel_sheet(df, sheet_name, all_chunks, chunks_with_metadata, filename)
+                
+        except Exception as e:
+            print(f"Error processing sheet {sheet_name} as travel plan: {str(e)}")
+            # Fallback to generic processing
+            try:
+                df = pd.read_excel(excel_content, sheet_name=sheet_name)
+                process_generic_excel_sheet(df, sheet_name, all_chunks, chunks_with_metadata, filename)
+            except Exception as inner_e:
+                print(f"Fallback processing failed for sheet {sheet_name}: {str(inner_e)}")
+
+def process_structured_database(excel_content, sheet_names, all_chunks, chunks_with_metadata, filename):
+    """Extract information from a structured database Excel file"""
+    for sheet_idx, sheet_name in enumerate(sheet_names, 1):
+        try:
+            df = pd.read_excel(excel_content, sheet_name=sheet_name)
+            process_generic_excel_sheet(df, sheet_name, all_chunks, chunks_with_metadata, filename)
+        except Exception as e:
+            print(f"Error processing sheet {sheet_name} as database: {str(e)}")
+
+def process_generic_excel_sheet(df, sheet_name, all_chunks, chunks_with_metadata, filename):
+    """Process any Excel sheet in a generic way to extract text"""
+    try:
+        # Drop completely empty rows and columns
+        df = df.dropna(how='all').dropna(axis=1, how='all')
+        
+        if df.empty:
+            return
+            
+        # Get column descriptions
+        columns_desc = f"Columns in sheet {sheet_name}: {', '.join(str(col) for col in df.columns)}"
+        
+        # Create chunks from the dataframe
+        # First, a summary chunk with column info and basic stats
+        summary = f"Excel Sheet: {sheet_name}\n{columns_desc}\n"
+        summary += f"Contains {len(df)} rows and {len(df.columns)} columns.\n"
+        
+        # Add data type information
+        summary += "Data types:\n"
+        for col in df.columns:
+            summary += f"  {col}: {df[col].dtype}\n"
+            
+        # Add some basic statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            summary += "\nNumeric column statistics:\n"
+            for col in numeric_cols:
+                summary += f"  {col}: Min={df[col].min()}, Max={df[col].max()}, Avg={df[col].mean():.2f}\n"
+        
+        # Add the summary as a chunk
+        all_chunks.append(summary)
+        chunks_with_metadata.append({
+            "text": summary,
+            "source": filename,
+            "page": f"Sheet {sheet_name} (Summary)"
+        })
+        
+        # Convert dataframe to text chunks
+        # Process by groups of rows to create manageable chunks
+        rows_per_chunk = 10
+        for i in range(0, len(df), rows_per_chunk):
+            chunk_df = df.iloc[i:i+rows_per_chunk]
+            chunk_text = f"Excel Sheet: {sheet_name} (Rows {i+1}-{min(i+rows_per_chunk, len(df))})\n\n"
+            
+            # Convert chunk to text
+            for _, row in chunk_df.iterrows():
+                for col in chunk_df.columns:
+                    if pd.notna(row[col]):
+                        # Format dates and times specially
+                        if isinstance(row[col], (datetime.datetime, datetime.date)):
+                            chunk_text += f"{col}: {row[col].strftime('%Y-%m-%d %H:%M:%S' if isinstance(row[col], datetime.datetime) else '%Y-%m-%d')}, "
+                        else:
+                            chunk_text += f"{col}: {row[col]}, "
+                chunk_text += "\n"
+            
+            if len(chunk_text.strip()) > 10:  # Only add if there's meaningful content
+                all_chunks.append(chunk_text)
+                chunks_with_metadata.append({
+                    "text": chunk_text,
+                    "source": filename,
+                    "page": f"Sheet {sheet_name} (Rows {i+1}-{min(i+rows_per_chunk, len(df))})"
+                })
+                
+    except Exception as e:
+        print(f"Error in generic Excel processing for sheet {sheet_name}: {str(e)}")
 
 def retrieve_chunks(query, top_k=3):
     """
