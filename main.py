@@ -29,8 +29,46 @@ except LookupError:
 # Initialize global variables
 vector_db = None
 chunks_with_metadata = []
-tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Initialize tokenizer with more robust error handling
+try:
+    tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+except Exception as e:
+    print(f"Error loading tokenizer: {str(e)}")
+    # Fallback to a simpler tokenizer
+    from transformers import BertTokenizer
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+
+# Initialize sentence transformer with robust error handling
+try:
+    # Try with specific device settings to avoid CUDA issues
+    model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+except Exception as e:
+    print(f"Error loading sentence transformer model: {str(e)}")
+    try:
+        # Try alternative model
+        model = SentenceTransformer('paraphrase-MiniLM-L6-v2', device='cpu')
+    except Exception as inner_e:
+        print(f"Error loading alternative model: {str(inner_e)}")
+        # Define a simple fallback embedding function
+        from transformers import BertModel, BertTokenizer
+        import torch
+        
+        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        bert_model = BertModel.from_pretrained('bert-base-uncased')
+        
+        def simple_encode(sentences, convert_to_numpy=True):
+            # Simple encoding function using BERT
+            encoded_input = bert_tokenizer(sentences, padding=True, truncation=True, return_tensors='pt')
+            with torch.no_grad():
+                model_output = bert_model(**encoded_input)
+            # Use the CLS token embedding as sentence embedding
+            embeddings = model_output.last_hidden_state[:, 0, :].numpy() if convert_to_numpy else model_output.last_hidden_state[:, 0, :]
+            return embeddings
+        
+        # Replace the model's encode method with our simple implementation
+        model = type('', (), {})()  # Create empty object
+        model.encode = simple_encode
 
 def process_documents(files):
     """

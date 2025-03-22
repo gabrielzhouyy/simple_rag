@@ -15,7 +15,7 @@ if st.button("🔄 Reset Everything"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     # Rerun the app to clear UI elements
-    st.experimental_rerun()
+    st.rerun()  # Changed from experimental_rerun() to rerun()
 
 # Configure OpenAI API key
 if "OPENAI_API_KEY" in st.secrets:
@@ -117,7 +117,7 @@ if st.session_state.error:
         st.session_state.processed = False
         st.session_state.gsheet_processed = False
         st.session_state.error = None
-        st.experimental_rerun()
+        st.rerun()  # Changed from experimental_rerun() to rerun()
 
 # Query input and processing
 if st.session_state.get('processed', False) or st.session_state.get('gsheet_processed', False):
